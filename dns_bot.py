@@ -81,6 +81,11 @@ def api_call(method, path, data=None):
         elif method == "POST":
             h["Content-Type"] = "application/json"
             r = requests.post(url, headers=h, json=data, timeout=30)
+        elif method == "DELETE":
+            r = requests.delete(url, headers=h, timeout=30)
+        elif method == "PUT":
+            h["Content-Type"] = "application/json"
+            r = requests.put(url, headers=h, json=data, timeout=30)
         return r.json() if r.text else {}, r.status_code
     except Exception as e:
         return None, str(e)
@@ -123,15 +128,10 @@ def delete_hostname_api(hostname_id):
 
 def rename_hostname_api(hostname_id, new_name):
     """Rename a hostname. Returns (success, message)."""
-    h = {"accept": "application/json", "API-Key": DYNU_API_KEY, "Content-Type": "application/json"}
-    try:
-        r = requests.put(f"https://api.dynu.com/v2/dns/{hostname_id}", 
-            headers=h, json={"name": new_name}, timeout=30)
-        if r.status_code == 200:
-            return True, "Renamed"
-        return False, f"HTTP {r.status_code}"
-    except Exception as e:
-        return False, str(e)
+    _, status = api_call("PUT", f"/dns/{hostname_id}", {"name": new_name})
+    if status == 200:
+        return True, "Renamed"
+    return False, f"HTTP {status}"
 
 # ═══════════════════════════════════════
 # KEYBOARDS
