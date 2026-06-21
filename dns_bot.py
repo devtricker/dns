@@ -148,13 +148,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
     await asyncio.sleep(0.5)
     
-    # --- WELCOME STICKER ---
-    # Animated duck sticker (Telegram built-in sticker pack)
-    await context.bot.send_sticker(
-        chat_id=update.effective_chat.id,
-        sticker="CAACAgIAAxkBAAEL8DVmZyJqIYbBgJgABNx4XAQyLNXyqAACWQADUomRI4GjCIIsVEIdNgQ"  # Happy duck
-    )
-    
     # --- PREMIUM WELCOME MESSAGE ---
     welcome = f"""
 {E['sparkles']} *WELCOME TO DUCK DNS BOT* {E['sparkles']}
