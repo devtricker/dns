@@ -8,6 +8,7 @@ import asyncio
 import json
 import os
 import random
+import re
 import string
 import requests
 from datetime import datetime
@@ -29,7 +30,7 @@ DYNU_DOMAINS = [
 ]
 
 # Conversation states
-WAIT_DOMAIN, WAIT_SUBDOMAIN, WAIT_IP, WAIT_HOSTNAME_UPDATE, WAIT_IP_UPDATE = range(5)
+WAIT_DOMAIN, WAIT_SUBDOMAIN, WAIT_IP, WAIT_HOSTNAME_UPDATE, WAIT_IP_UPDATE, WAIT_RENAME_NAME, WAIT_DELETE_CONFIRM = range(7)
 
 # ═══════════════════════════════════════
 # EMOJI KIT (Premium Styled)
@@ -63,6 +64,13 @@ def get_public_ip():
         except:
             pass
     return None
+
+def is_valid_ip(ip_str):
+    """Validate IPv4 address"""
+    m = re.match(r'^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$', ip_str.strip())
+    if not m:
+        return False
+    return all(0 <= int(g) <= 255 for g in m.groups())
 
 def api_call(method, path, data=None):
     h = {"accept": "application/json", "API-Key": DYNU_API_KEY}
@@ -106,6 +114,25 @@ def update_ip_api(hostname, ip):
         return "unchanged", resp
     return "failed", resp
 
+def delete_hostname_api(hostname_id):
+    """Delete a hostname by ID. Returns (success, message)."""
+    _, status = api_call("DELETE", f"/dns/{hostname_id}")
+    if status == 200:
+        return True, "Deleted"
+    return False, f"HTTP {status}"
+
+def rename_hostname_api(hostname_id, new_name):
+    """Rename a hostname. Returns (success, message)."""
+    h = {"accept": "application/json", "API-Key": DYNU_API_KEY, "Content-Type": "application/json"}
+    try:
+        r = requests.put(f"https://api.dynu.com/v2/dns/{hostname_id}", 
+            headers=h, json={"name": new_name}, timeout=30)
+        if r.status_code == 200:
+            return True, "Renamed"
+        return False, f"HTTP {r.status_code}"
+    except Exception as e:
+        return False, str(e)
+
 # ═══════════════════════════════════════
 # KEYBOARDS
 # ═══════════════════════════════════════
@@ -114,6 +141,8 @@ def main_menu():
         [InlineKeyboardButton(f"{E['list']}  My Hostnames", callback_data="list_hosts")],
         [InlineKeyboardButton(f"{E['plus']}  Create New Hostname", callback_data="create_new")],
         [InlineKeyboardButton(f"{E['refresh']}  Update IP", callback_data="update_ip_menu")],
+        [InlineKeyboardButton(f"{E['wrench']}  Rename Hostname", callback_data="rename_menu")],
+        [InlineKeyboardButton(f"{E['cross']}  Delete Hostname", callback_data="delete_menu")],
         [InlineKeyboardButton(f"{E['magnify']}  Check Current IP", callback_data="check_ip")],
         [InlineKeyboardButton(f"{E['book']}  Help & Info", callback_data="help")],
     ])
@@ -328,15 +357,11 @@ or type your own domain:
         domain = data.replace("domain_", "")
         context.user_data["new_domain"] = domain
         
-        current_ip = get_public_ip()
-        context.user_data["current_ip"] = current_ip
-        
         text = f"""
 {E['plus']} *CREATE NEW HOSTNAME* {E['plus']}
 {E['diamond']} ━━━━━━━━━━━━━━━━━━━━ {E['diamond']}
 
 {E['globe']} *Domain:* `{domain}`
-{E['satellite']} *Your IP:* `{current_ip or 'unknown'}`
 
 {E['target']} *Step 2/3:* Reply with subdomain name
 
@@ -352,53 +377,34 @@ or type your own domain:
             ])
         )
         return WAIT_SUBDOMAIN
-    
+
     # --- AUTO NAME ---
     elif data == "auto_name":
         domain = context.user_data.get("new_domain", "opik.net")
         sub = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
         full = f"{sub}.{domain}"
-        ip = context.user_data.get("current_ip") or get_public_ip()
+        context.user_data["new_full"] = full
         
         text = f"""
 {E['bot']} *AUTO-GENERATED* {E['bot']}
 {E['diamond']} ━━━━━━━━━━━━━━━━━━━━ {E['diamond']}
 
-{E['sparkles']} *Creating hostname...*
-
-{E['globe']} `{full}`
-{E['link']} → `{ip}`
-
-{E['hourglass']} Please wait...
-"""
-        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN)
-        
-        success, resp = create_hostname_api(full, ip)
-        if success:
-            text = f"""
-{E['party']} *HOSTNAME CREATED!* {E['confetti']}
-{E['crown']} ━━━━━━━━━━━━━━━━━━━━ {E['crown']}
-
 {E['globe']} *Hostname:* `{full}`
-{E['satellite']} *IP:* `{ip}`
-{E['check']} *Status:* Active
 
-{E['clock']} DNS propagation: 2-5 minutes
-{E['lightning']} NIC Response: `{resp}`
+{E['target']} *Step 3/3:* Reply with IP address
 
-{E['sparkles']} ━━━━━━━━━━━━━━━━━━━━ {E['sparkles']}
-{E['star']} Your hostname is ready to use!
+{E['pen']} Example: `56.228.42.116`
+{E['bot']} Or send /autoip for current IP!
 """
-        else:
-            text = f"{E['cross']} Creation failed: `{resp}`"
-        
         await query.edit_message_text(
             text,
             parse_mode=ParseMode.MARKDOWN,
-            reply_markup=back_button()
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"{E['magnify']}  Use Current IP", callback_data="auto_ip")],
+                [InlineKeyboardButton(f"{E['home']}  « Cancel", callback_data="main_menu")],
+            ])
         )
-        context.user_data.clear()
-        return ConversationHandler.END
+        return WAIT_IP
     
     # --- UPDATE IP MENU ---
     elif data == "update_ip_menu":
@@ -428,51 +434,238 @@ or type your own domain:
     # --- UPDATE SPECIFIC HOSTNAME IP ---
     elif data.startswith("updateip_"):
         hostname = data.replace("updateip_", "")
-        ip = get_public_ip()
+        context.user_data["update_hostname"] = hostname
         
         text = f"""
-{E['refresh']} *UPDATING IP...* {E['hourglass']}
+{E['refresh']} *UPDATE IP* {E['refresh']}
 {E['diamond']} ━━━━━━━━━━━━━━━━━━━━ {E['diamond']}
 
-{E['globe']} Hostname: `{hostname}`
-{E['link']} New IP: `{ip}`
+{E['globe']} *Hostname:* `{hostname}`
+
+{E['target']} Reply with the new IP address
+
+{E['pen']} Example: `56.228.42.116`
+{E['bot']} Or send /autoip for current IP!
 """
-        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN)
+        await query.edit_message_text(
+            text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"{E['magnify']}  Use Current IP", callback_data="auto_ip_update")],
+                [InlineKeyboardButton(f"{E['home']}  « Cancel", callback_data="main_menu")],
+            ])
+        )
+        return WAIT_IP_UPDATE
+    
+    # --- AUTO IP for creation ---
+    elif data == "auto_ip":
+        ip = get_public_ip()
+        if not ip:
+            await query.edit_message_text(
+                f"{E['cross']} Could not detect IP! Please type it manually.",
+                reply_markup=back_button()
+            )
+            context.user_data.clear()
+            return ConversationHandler.END
+        
+        full = context.user_data.get("new_full", "unknown.opik.net")
+        await query.edit_message_text(
+            f"{E['hourglass']} Using current IP: `{ip}`\nCreating `{full}`...",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        success, resp = create_hostname_api(full, ip)
+        if success:
+            text = f"""
+{E['party']} *HOSTNAME CREATED!* {E['confetti']}
+{E['crown']} ━━━━━━━━━━━━━━━━━━━━ {E['crown']}
+
+{E['globe']} *Hostname:* `{full}`
+{E['satellite']} *IP:* `{ip}`
+{E['check']} *Status:* Active {E['fire']}
+
+{E['clock']} DNS propagation: ~2-5 min
+{E['lightning']} Response: `{resp}`
+"""
+        else:
+            text = f"{E['cross']} Failed: `{resp}`"
+        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=back_button())
+        context.user_data.clear()
+        return ConversationHandler.END
+    
+    # --- AUTO IP for update ---
+    elif data == "auto_ip_update":
+        ip = get_public_ip()
+        if not ip:
+            await query.edit_message_text(
+                f"{E['cross']} Could not detect IP! Please type it manually.",
+                reply_markup=back_button()
+            )
+            context.user_data.clear()
+            return ConversationHandler.END
+        
+        hostname = context.user_data.get("update_hostname", "unknown")
+        await query.edit_message_text(
+            f"{E['hourglass']} Using current IP: `{ip}`\nUpdating `{hostname}`...",
+            parse_mode=ParseMode.MARKDOWN
+        )
         
         status, resp = update_ip_api(hostname, ip)
         if status == "updated":
             text = f"""
 {E['check']} *IP UPDATED!* {E['rocket']}
-{E['diamond']} ━━━━━━━━━━━━━━━━━━━━ {E['diamond']}
-
 {E['globe']} *Hostname:* `{hostname}`
 {E['satellite']} *New IP:* `{ip}`
-{E['check']} *Status:* Updated successfully!
-
-{E['sparkles']} DNS propagating globally...
 """
         elif status == "unchanged":
             text = f"""
 {E['info']} *IP UNCHANGED* {E['info']}
-{E['diamond']} ━━━━━━━━━━━━━━━━━━━━ {E['diamond']}
-
 {E['globe']} *Hostname:* `{hostname}`
-{E['link']} *IP:* `{ip}`
-{E['check']} Already up-to-date!
+{E['link']} *IP:* `{ip}` (already set)
 """
         else:
             text = f"{E['cross']} Update failed: `{resp}`"
-        
         await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=back_button())
+        context.user_data.clear()
+        return ConversationHandler.END
+    
+    # --- RENAME MENU ---
+    elif data == "rename_menu":
+        hosts = list_hostnames()
+        if hosts:
+            btns = []
+            for h in hosts:
+                btns.append([InlineKeyboardButton(
+                    f"{E['globe']} {h['name']}",
+                    callback_data=f"renid_{h['id']}"
+                )])
+            btns.append([InlineKeyboardButton(f"{E['home']}  « Cancel", callback_data="main_menu")])
+            keyboard = InlineKeyboardMarkup(btns)
+            text = f"""
+{E['wrench']} *RENAME HOSTNAME* {E['wrench']}
+{E['diamond']} ━━━━━━━━━━━━━━━━━━━━ {E['diamond']}
+
+{E['target']} Pick a hostname to rename:
+"""
+        else:
+            keyboard = back_button()
+            text = f"{E['warning']} No hostnames to rename!"
+        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+    
+    # --- RENAME SPECIFIC HOSTNAME ---
+    elif data.startswith("renid_"):
+        hostname_id = int(data.replace("renid_", ""))
+        # Find hostname name
+        hosts = list_hostnames()
+        old_name = "unknown"
+        for h in hosts:
+            if h['id'] == hostname_id:
+                old_name = h['name']
+                break
+        context.user_data["rename_id"] = hostname_id
+        context.user_data["rename_old"] = old_name
+        
+        text = f"""
+{E['wrench']} *RENAME HOSTNAME* {E['wrench']}
+{E['diamond']} ━━━━━━━━━━━━━━━━━━━━ {E['diamond']}
+
+{E['globe']} *Current:* `{old_name}`
+
+{E['target']} Reply with the new hostname:
+{E['pen']} Example: `mynewserver.opik.net`
+"""
+        await query.edit_message_text(
+            text, parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"{E['home']}  « Cancel", callback_data="main_menu")]
+            ])
+        )
+        return WAIT_RENAME_NAME
+    
+    # --- DELETE MENU ---
+    elif data == "delete_menu":
+        hosts = list_hostnames()
+        if hosts:
+            btns = []
+            for h in hosts:
+                btns.append([InlineKeyboardButton(
+                    f"{E['cross']} {h['name']}",
+                    callback_data=f"delid_{h['id']}"
+                )])
+            btns.append([InlineKeyboardButton(f"{E['home']}  « Cancel", callback_data="main_menu")])
+            keyboard = InlineKeyboardMarkup(btns)
+            text = f"""
+{E['cross']} *DELETE HOSTNAME* {E['cross']}
+{E['diamond']} ━━━━━━━━━━━━━━━━━━━━ {E['diamond']}
+
+{E['warning']} *WARNING:* This cannot be undone!
+
+{E['target']} Pick a hostname to delete:
+"""
+        else:
+            keyboard = back_button()
+            text = f"{E['warning']} No hostnames to delete!"
+        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+    
+    # --- DELETE CONFIRMATION ---
+    elif data.startswith("delid_"):
+        hostname_id = int(data.replace("delid_", ""))
+        hosts = list_hostnames()
+        hostname = "unknown"
+        for h in hosts:
+            if h['id'] == hostname_id:
+                hostname = h['name']
+                break
+        context.user_data["delete_id"] = hostname_id
+        context.user_data["delete_name"] = hostname
+        
+        text = f"""
+{E['cross']} *CONFIRM DELETE* {E['cross']}
+{E['diamond']} ━━━━━━━━━━━━━━━━━━━━ {E['diamond']}
+
+{E['warning']} Are you sure you want to delete:
+
+{E['globe']} *`{hostname}`*
+
+{E['fire']} This action *cannot be undone*!
+"""
+        await query.edit_message_text(
+            text, parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"{E['check']}  Yes, Delete It!", callback_data="confirm_delete"),
+                 InlineKeyboardButton(f"{E['home']}  « Cancel", callback_data="main_menu")],
+            ])
+        )
+        return WAIT_DELETE_CONFIRM
+    
+    # --- CONFIRMED DELETE ---
+    elif data == "confirm_delete":
+        hostname_id = context.user_data.get("delete_id")
+        hostname = context.user_data.get("delete_name", "unknown")
+        
+        success, resp = delete_hostname_api(hostname_id)
+        if success:
+            text = f"""
+{E['check']} *HOSTNAME DELETED!* {E['check']}
+{E['diamond']} ━━━━━━━━━━━━━━━━━━━━ {E['diamond']}
+
+{E['cross']} *`{hostname}`* has been permanently deleted.
+
+{E['sparkles']} ━━━━━━━━━━━━━━━━━━━━ {E['sparkles']}
+"""
+        else:
+            text = f"{E['cross']} Delete failed: `{resp}`"
+        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=back_button())
+        context.user_data.clear()
+        return ConversationHandler.END
     
     # --- HELP ---
     elif data == "help":
         await help_cmd(update, context)
 
 async def receive_subdomain(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Receive subdomain name from user text"""
+    """Receive subdomain name from user text, then ask for IP"""
     sub = update.message.text.strip().lower()
-    # Remove /auto if typed
     if sub.startswith("/"):
         sub = sub.replace("/", "").replace("auto", "")
     if not sub:
@@ -480,10 +673,42 @@ async def receive_subdomain(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     domain = context.user_data.get("new_domain", "opik.net")
     full = f"{sub}.{domain}"
-    ip = context.user_data.get("current_ip") or get_public_ip()
+    context.user_data["new_full"] = full
+    
+    text = f"""
+{E['plus']} *CREATE NEW HOSTNAME* {E['plus']}
+{E['diamond']} ━━━━━━━━━━━━━━━━━━━━ {E['diamond']}
+
+{E['globe']} *Hostname:* `{full}`
+
+{E['target']} *Step 3/3:* Reply with IP address
+
+{E['pen']} Example: `56.228.42.116`
+{E['bot']} Or tap the button below for auto IP!
+"""
+    await update.message.reply_text(
+        text,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"{E['magnify']}  Use Current IP", callback_data="auto_ip")],
+            [InlineKeyboardButton(f"{E['home']}  « Cancel", callback_data="main_menu")],
+        ])
+    )
+    return WAIT_IP
+
+async def receive_ip_for_create(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receive IP for new hostname creation"""
+    ip = update.message.text.strip()
+    if not is_valid_ip(ip):
+        await update.message.reply_text(
+            f"{E['cross']} Invalid IP format! Please enter a valid IPv4 address like `56.228.42.116`\n{E['home']} Or /cancel to abort",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return WAIT_IP
+    
+    full = context.user_data.get("new_full", "unknown.opik.net")
     
     await update.message.reply_chat_action(action=ChatAction.TYPING)
-    
     msg = await update.message.reply_text(
         f"{E['hourglass']} Creating `{full}` → `{ip}`...",
         parse_mode=ParseMode.MARKDOWN
@@ -508,6 +733,90 @@ async def receive_subdomain(update: Update, context: ContextTypes.DEFAULT_TYPE):
 """
     else:
         text = f"{E['cross']} Failed: `{resp}`"
+    
+    await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=back_button())
+    context.user_data.clear()
+    return ConversationHandler.END
+
+async def receive_ip_for_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receive IP for updating existing hostname"""
+    ip = update.message.text.strip()
+    if not is_valid_ip(ip):
+        await update.message.reply_text(
+            f"{E['cross']} Invalid IP format! Please enter a valid IPv4 address like `56.228.42.116`\n{E['home']} Or /cancel to abort",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return WAIT_IP_UPDATE
+    
+    hostname = context.user_data.get("update_hostname", "unknown")
+    
+    await update.message.reply_chat_action(action=ChatAction.TYPING)
+    msg = await update.message.reply_text(
+        f"{E['hourglass']} Updating `{hostname}` → `{ip}`...",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    status, resp = update_ip_api(hostname, ip)
+    if status == "updated":
+        text = f"""
+{E['check']} *IP UPDATED!* {E['rocket']}
+{E['diamond']} ━━━━━━━━━━━━━━━━━━━━ {E['diamond']}
+
+{E['globe']} *Hostname:* `{hostname}`
+{E['satellite']} *New IP:* `{ip}`
+{E['check']} *Status:* Updated successfully!
+
+{E['sparkles']} DNS propagating globally...
+"""
+    elif status == "unchanged":
+        text = f"""
+{E['info']} *IP UNCHANGED* {E['info']}
+{E['diamond']} ━━━━━━━━━━━━━━━━━━━━ {E['diamond']}
+
+{E['globe']} *Hostname:* `{hostname}`
+{E['link']} *IP:* `{ip}`
+{E['check']} Already up-to-date!
+"""
+    else:
+        text = f"{E['cross']} Update failed: `{resp}`"
+    
+    await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=back_button())
+    context.user_data.clear()
+    return ConversationHandler.END
+
+async def receive_rename_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receive new hostname for rename"""
+    new_name = update.message.text.strip().lower()
+    old_name = context.user_data.get("rename_old", "unknown")
+    rename_id = context.user_data.get("rename_id")
+    
+    if not new_name or "." not in new_name:
+        await update.message.reply_text(
+            f"{E['cross']} Please enter full hostname (e.g. `myserver.opik.net`)!\n{E['home']} Or /cancel",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return WAIT_RENAME_NAME
+    
+    await update.message.reply_chat_action(action=ChatAction.TYPING)
+    msg = await update.message.reply_text(
+        f"{E['hourglass']} Renaming `{old_name}` → `{new_name}`...",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    success, resp = rename_hostname_api(rename_id, new_name)
+    if success:
+        text = f"""
+{E['check']} *HOSTNAME RENAMED!* {E['party']}
+{E['diamond']} ━━━━━━━━━━━━━━━━━━━━ {E['diamond']}
+
+{E['globe']} *Old:* `{old_name}`
+{E['sparkles']} *New:* `{new_name}`
+
+{E['clock']} DNS propagation: ~2-5 min
+{E['sparkles']} ━━━━━━━━━━━━━━━━━━━━ {E['sparkles']}
+"""
+    else:
+        text = f"{E['cross']} Rename failed: `{resp}`"
     
     await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=back_button())
     context.user_data.clear()
@@ -569,14 +878,33 @@ def main():
     
     app = Application.builder().token(BOT_TOKEN).build()
     
-    # Create conversation handler for hostname creation flow
+    # Create conversation handler for hostname creation & update flow
     conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(button_handler, pattern="^(create_new|auto_name|domain_)")],
+        entry_points=[
+            CallbackQueryHandler(button_handler, pattern="^(create_new|auto_name|domain_)"),
+            CallbackQueryHandler(button_handler, pattern="^updateip_"),
+            CallbackQueryHandler(button_handler, pattern="^renid_"),
+            CallbackQueryHandler(button_handler, pattern="^delid_"),
+        ],
         states={
             WAIT_SUBDOMAIN: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_subdomain),
-                CallbackQueryHandler(button_handler, pattern="^auto_name$"),
+                CallbackQueryHandler(button_handler, pattern="^(auto_name|main_menu)$"),
+            ],
+            WAIT_IP: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_ip_for_create),
+                CallbackQueryHandler(button_handler, pattern="^(auto_ip|main_menu)$"),
+            ],
+            WAIT_IP_UPDATE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_ip_for_update),
+                CallbackQueryHandler(button_handler, pattern="^(auto_ip_update|main_menu)$"),
+            ],
+            WAIT_RENAME_NAME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_rename_name),
                 CallbackQueryHandler(button_handler, pattern="^main_menu$"),
+            ],
+            WAIT_DELETE_CONFIRM: [
+                CallbackQueryHandler(button_handler, pattern="^(confirm_delete|main_menu)$"),
             ],
         },
         fallbacks=[
